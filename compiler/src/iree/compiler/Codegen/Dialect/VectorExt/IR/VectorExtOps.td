@@ -197,6 +197,10 @@ def IREEVectorExt_TransferGatherOp : IREEVectorExt_PureOp<"transfer_gather", [
       return getIndexingMapsArray().back();
     }
 
+    VectorType getVectorType() {
+      return getVector().getType();
+    }
+
     /// Invert the source indexing map to get a permutation map suitable for
     /// vector.transfer_read. The source map is
     /// (vector_dims)[symbols] -> (source_dims). This returns
