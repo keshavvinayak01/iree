@@ -4,6 +4,9 @@
 
 // Check that skinny scaled matmuls are sent down the #iree_gpu.pipeline<VectorDistribute> pipeline.
 
+// CHECK-DAG: #iree_codegen.translation_info<pipeline = #iree_gpu.pipeline<VectorDistribute> workgroup_size = [64, 1, 1] subgroup_size = 64, {gpu_pipeline_options =
+// CHECK-DAG: #[[$F32_ATTENTION_TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.pipeline<VectorDistribute> workgroup_size = [64, 1, 1] subgroup_size = 64, {iree_codegen.denormal_fp_math_f32 =
+
 #pipeline_layout = #hal.pipeline.layout<bindings = [
   #hal.pipeline.binding<storage_buffer>,
   #hal.pipeline.binding<storage_buffer>,
@@ -46,5 +49,47 @@ func.func @skinny_scaled_matmul() {
   iree_tensor_ext.dispatch.tensor.store %13, %4, offsets = [4, 1024], sizes = [4, 1024], strides = [1, 1] : tensor<4x1024xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<4x1024xf32>>
   return
 }
-//       CHECK: #iree_codegen.translation_info<pipeline = #iree_gpu.pipeline<VectorDistribute> workgroup_size = [64, 1, 1] subgroup_size = 64
 // CHECK-LABEL: @skinny_scaled_matmul
+
+// Cover the rank-5 f32 N/K2-tail case that keeps the attention reduction config.
+// Unit-batch variants fold to rank-4 and keep using generic Distribute.
+
+// CHECK-LABEL: func.func @attention_f32_3x3x4()
+//  CHECK-SAME: attributes {translation_info = #[[$F32_ATTENTION_TRANSLATION]]}
+//       CHECK: iree_linalg_ext.online_attention
+//  CHECK-SAME: lowering_config = #iree_gpu.lowering_config
+
+#pipeline_layout_attention = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
+]>
+func.func @attention_f32_3x3x4() {
+  %cst = arith.constant 0.5 : f32
+  %c0 = arith.constant 0 : index
+  %0 = hal.interface.binding.subspan layout(#pipeline_layout_attention) binding(0) alignment(64) offset(%c0) flags(ReadOnly) : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x4xf32>>
+  %1 = hal.interface.binding.subspan layout(#pipeline_layout_attention) binding(1) alignment(64) offset(%c0) flags(ReadOnly) : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x4xf32>>
+  %2 = hal.interface.binding.subspan layout(#pipeline_layout_attention) binding(2) alignment(64) offset(%c0) flags(ReadOnly) : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x4xf32>>
+  %3 = hal.interface.binding.subspan layout(#pipeline_layout_attention) binding(3) alignment(64) offset(%c0) : !iree_tensor_ext.dispatch.tensor<writeonly:tensor<3x3x4xf32>>
+  %q = iree_tensor_ext.dispatch.tensor.load %0, offsets = [0, 0, 0], sizes = [3, 3, 4], strides = [1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x4xf32>> -> tensor<3x3x4xf32>
+  %k = iree_tensor_ext.dispatch.tensor.load %1, offsets = [0, 0, 0], sizes = [3, 3, 4], strides = [1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x4xf32>> -> tensor<3x3x4xf32>
+  %v = iree_tensor_ext.dispatch.tensor.load %2, offsets = [0, 0, 0], sizes = [3, 3, 4], strides = [1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x4xf32>> -> tensor<3x3x4xf32>
+  %empty = tensor.empty() : tensor<3x3x4xf32>
+  %empty_red = tensor.empty() : tensor<3x3xf32>
+  %att:3 = iree_linalg_ext.online_attention
+      {indexing_maps = [affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2)>,
+                        affine_map<(d0, d1, d2, d3, d4) -> (d0, d3, d2)>,
+                        affine_map<(d0, d1, d2, d3, d4) -> (d0, d3, d4)>,
+                        affine_map<(d0, d1, d2, d3, d4) -> ()>,
+                        affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d4)>,
+                        affine_map<(d0, d1, d2, d3, d4) -> (d0, d1)>,
+                        affine_map<(d0, d1, d2, d3, d4) -> (d0, d1)>]}
+      ins(%q, %k, %v, %cst : tensor<3x3x4xf32>, tensor<3x3x4xf32>, tensor<3x3x4xf32>, f32)
+      outs(%empty, %empty_red, %empty_red : tensor<3x3x4xf32>, tensor<3x3xf32>, tensor<3x3xf32>) {
+    ^bb0(%score: f32):
+      iree_linalg_ext.yield %score : f32
+  } -> tensor<3x3x4xf32>, tensor<3x3xf32>, tensor<3x3xf32>
+  iree_tensor_ext.dispatch.tensor.store %att#0, %3, offsets = [0, 0, 0], sizes = [3, 3, 4], strides = [1, 1, 1] : tensor<3x3x4xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<3x3x4xf32>>
+  return
+}
